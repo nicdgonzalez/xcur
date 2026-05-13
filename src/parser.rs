@@ -33,4 +33,9 @@ impl<'a> Parser<'a> {
         self.buffer = remainder;
         Ok(bytes)
     }
+
+    pub fn read_card32(&mut self) -> Result<u32, ParseError> {
+        let bytes = self.read_bytes(4)?;
+        Ok(bytes.try_into().map(u32::from_le_bytes).unwrap())
+    }
 }
