@@ -80,93 +80,136 @@ impl TryFrom<&[u8]> for Xcursor {
     fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
         let mut parser = Parser::new(value);
 
-        // Parse the Table of Contents
-        let signature = parser.read_bytes(4)?;
-
-        if signature != b"Xcur" {
-            return Err(ParseError::InvalidSignature);
-        }
-
-        let header_size = parser.read_card32()?;
-        println!("Header size: {header_size}");
-
-        let version = parser.read_card32()?;
-        println!("File version: {version}");
-
-        let ntoc = parser.read_card32()?;
-        let ntoc = usize::try_from(ntoc).expect("u32 overflowed usize");
-        let toc = parser
-            .read_bytes(mem::size_of::<TocEntry>() * ntoc)?
-            .chunks_exact(mem::size_of::<TocEntry>())
-            .filter_map(|chunk| {
-                let mut fields = chunk
-                    .chunks_exact(mem::size_of::<u32>())
-                    .map(|field| field.try_into().map(u32::from_le_bytes).unwrap());
-
-                let r#type = match fields.next().unwrap() {
-                    0xFFFE_0001 => Type::Comment,
-                    0xFFFD_0002 => Type::Image,
-                    n => {
-                        tracing::warn!("ignoring unknown entry type: {n}");
-                        return None;
-                    }
-                };
-
-                let subtype = match fields.next().unwrap() {
-                    n if r#type == Type::Comment => match n {
-                        1 => Subtype::Comment(Comment::Copyright),
-                        2 => Subtype::Comment(Comment::License),
-                        3 => Subtype::Comment(Comment::Other),
-                        n => {
-                            tracing::warn!("ignoring unknown entry subtype: {n}");
-                            return None;
-                        }
-                    },
-                    nominal if r#type == Type::Image => Subtype::Image(nominal),
-                    _ => unreachable!("should have returned already if unknown type"),
-                };
-
-                let position = fields.next().unwrap();
-
-                Some(TocEntry {
-                    r#type,
-                    subtype,
-                    position,
-                })
-            })
-            .collect::<Vec<TocEntry>>();
-        println!("Table of contents: {toc:?}");
+        let header = read_header(&mut parser)?;
+        println!("Header size: {}", header.size);
+        println!("File version: {}", header.version);
+        println!("Length of Table of Contents: {}", header.ntoc);
+        println!("Table of contents: {:#?}", header.toc);
 
         todo!()
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct Header {
+    size: u32,
+    version: u32,
+    ntoc: u32,
+    toc: Vec<Entry>,
+}
+
+/// Represents an entry in the Table of Contents.
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
-pub struct TocEntry {
+pub struct Entry {
     r#type: Type,
     subtype: Subtype,
     position: u32,
 }
 
+/// Represents the available chunk types.
 #[repr(u32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Type {
-    Comment = 0xFFFE_0001,
     Image = 0xFFFD_0002,
+    Comment = 0xFFFE_0001,
 }
 
+impl TryFrom<u32> for Type {
+    type Error = u32;
+
+    fn try_from(value: u32) -> Result<Self, Self::Error> {
+        match value {
+            0xFFFD_0002 => Ok(Self::Image),
+            0xFFFE_0001 => Ok(Self::Comment),
+            n => Err(n),
+        }
+    }
+}
+
+/// Represents the available chunk subtypes.
 #[repr(u32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Subtype {
+    Image { nominal: u32 },
     Comment(Comment),
-    Image(u32),
 }
 
+/// Represents the different subtypes of a comment chunk.
 #[repr(u32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Comment {
     Copyright = 1,
     License = 2,
     Other = 3,
+}
+
+impl TryFrom<u32> for Comment {
+    type Error = u32;
+
+    fn try_from(value: u32) -> Result<Self, Self::Error> {
+        match value {
+            1 => Ok(Self::Copyright),
+            2 => Ok(Self::License),
+            3 => Ok(Self::Other),
+            n => Err(n),
+        }
+    }
+}
+
+/// Parse the file header.
+fn read_header(parser: &mut Parser) -> Result<Header, ParseError> {
+    let signature = parser.read_bytes(4)?;
+
+    if signature != b"Xcur" {
+        return Err(ParseError::InvalidSignature);
+    }
+
+    let header_size = parser.read_card32()?;
+    let version = parser.read_card32()?;
+    let ntoc = parser.read_card32()?;
+
+    let ntoc_usize = usize::try_from(ntoc).expect("u32 overflowed usize");
+    let toc_size = mem::size_of::<Entry>() * ntoc_usize;
+
+    let toc = parser
+        .read_bytes(toc_size)?
+        .chunks_exact(mem::size_of::<Entry>())
+        .filter_map(|chunk| {
+            let mut fields = chunk
+                .chunks_exact(mem::size_of::<u32>())
+                .map(|field| field.try_into().map(u32::from_le_bytes).unwrap());
+
+            let r#type = Type::try_from(fields.next().unwrap())
+                .inspect_err(|n| tracing::warn!("unknown entry type: {n}"))
+                .ok()?;
+
+            let subtype = match fields.next().unwrap() {
+                n if r#type == Type::Comment => {
+                    let kind = Comment::try_from(n)
+                        .inspect_err(|n| tracing::warn!("unknown comment entry subtype: {n}"))
+                        .ok()?;
+
+                    Subtype::Comment(kind)
+                }
+                nominal if r#type == Type::Image => Subtype::Image { nominal },
+                _ => unreachable!("should have returned already if unknown type"),
+            };
+
+            let position = fields.next().unwrap();
+
+            Some(Entry {
+                r#type,
+                subtype,
+                position,
+            })
+        })
+        .collect::<Vec<Entry>>();
+
+    Ok(Header {
+        size: header_size,
+        version,
+        ntoc,
+        toc,
+    })
 }
