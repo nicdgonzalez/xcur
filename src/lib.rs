@@ -184,16 +184,15 @@ fn read_header(parser: &mut Parser) -> Result<Header, ParseError> {
                 .inspect_err(|n| tracing::warn!("unknown entry type: {n}"))
                 .ok()?;
 
-            let subtype = match fields.next().unwrap() {
-                n if r#type == Type::Comment => {
-                    let kind = Comment::try_from(n)
+            let subtype = {
+                let value = fields.next().unwrap();
+                match r#type {
+                    Type::Comment => Comment::try_from(value)
                         .inspect_err(|n| tracing::warn!("unknown comment entry subtype: {n}"))
-                        .ok()?;
-
-                    Subtype::Comment(kind)
+                        .map(Subtype::Comment)
+                        .ok()?,
+                    Type::Image => Subtype::Image { nominal: value },
                 }
-                nominal if r#type == Type::Image => Subtype::Image { nominal },
-                _ => unreachable!("should have returned already if unknown type"),
             };
 
             let position = fields.next().unwrap();
