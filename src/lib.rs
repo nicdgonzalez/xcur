@@ -74,32 +74,79 @@ impl Xcursor {
     }
 }
 
+// We intentionally do not use `mem::size_of::<Entry>()` here because our `Entry` struct contains
+// nested enums, which increases the struct's size beyond the original layout.
+const ENTRY_SIZE: usize = 12;
+
 impl TryFrom<&[u8]> for Xcursor {
     type Error = ParseError;
 
     fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
         let mut parser = Parser::new(value);
 
-        let header = read_header(&mut parser)?;
-        println!("Header size: {}", header.size);
-        println!("File version: {}", header.version);
-        println!("Length of Table of Contents: {}", header.ntoc);
-        println!("Table of contents: {:#?}", header.toc);
+        let signature = parser.read_bytes(4)?;
+
+        if signature != b"Xcur" {
+            return Err(ParseError::InvalidSignature);
+        }
+
+        let header_size = parser.read_card32()?;
+        println!("Header size: {header_size}");
+        let version = parser.read_card32()?;
+        println!("File version: {version}");
+
+        let ntoc = parser.read_card32()?;
+        println!("Entries in Table of Contents: {ntoc}");
+
+        let ntoc_usize = usize::try_from(ntoc).expect("u32 overflowed usize");
+        let toc_size = ENTRY_SIZE * ntoc_usize;
+
+        let toc = parser
+            .read_bytes(toc_size)?
+            .as_chunks::<ENTRY_SIZE>()
+            .0
+            .iter()
+            .filter_map(parse_entry)
+            .collect::<Vec<Entry>>();
+
+        println!("Table of contents: {toc:#?}");
 
         todo!()
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct Header {
-    size: u32,
-    version: u32,
-    ntoc: u32,
-    toc: Vec<Entry>,
+fn parse_entry(chunk: &[u8; ENTRY_SIZE]) -> Option<Entry> {
+    let mut fields = chunk
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|&bytes| u32::from_le_bytes(bytes));
+
+    let r#type = Type::try_from(fields.next().unwrap())
+        .inspect_err(|n| tracing::warn!("unknown entry type: {n}"))
+        .ok()?;
+
+    let subtype = {
+        let value = fields.next().unwrap();
+        match r#type {
+            Type::Comment => Comment::try_from(value)
+                .inspect_err(|n| tracing::warn!("unknown comment entry subtype: {n}"))
+                .map(Subtype::Comment)
+                .ok()?,
+            Type::Image => Subtype::Image(value),
+        }
+    };
+
+    let position = fields.next().unwrap();
+
+    Some(Entry {
+        r#type,
+        subtype,
+        position,
+    })
 }
 
 /// Represents an entry in the Table of Contents.
-#[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct Entry {
     r#type: Type,
@@ -128,15 +175,13 @@ impl TryFrom<u32> for Type {
 }
 
 /// Represents the available chunk subtypes.
-#[repr(u32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Subtype {
-    Image { nominal: u32 },
+    Image(u32),
     Comment(Comment),
 }
 
 /// Represents the different subtypes of a comment chunk.
-#[repr(u32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Comment {
     Copyright = 1,
@@ -155,60 +200,4 @@ impl TryFrom<u32> for Comment {
             n => Err(n),
         }
     }
-}
-
-/// Parse the file header.
-fn read_header(parser: &mut Parser) -> Result<Header, ParseError> {
-    let signature = parser.read_bytes(4)?;
-
-    if signature != b"Xcur" {
-        return Err(ParseError::InvalidSignature);
-    }
-
-    let header_size = parser.read_card32()?;
-    let version = parser.read_card32()?;
-    let ntoc = parser.read_card32()?;
-
-    let ntoc_usize = usize::try_from(ntoc).expect("u32 overflowed usize");
-    let toc_size = mem::size_of::<Entry>() * ntoc_usize;
-
-    let toc = parser
-        .read_bytes(toc_size)?
-        .chunks_exact(mem::size_of::<Entry>())
-        .filter_map(|chunk| {
-            let mut fields = chunk
-                .chunks_exact(mem::size_of::<u32>())
-                .map(|field| field.try_into().map(u32::from_le_bytes).unwrap());
-
-            let r#type = Type::try_from(fields.next().unwrap())
-                .inspect_err(|n| tracing::warn!("unknown entry type: {n}"))
-                .ok()?;
-
-            let subtype = {
-                let value = fields.next().unwrap();
-                match r#type {
-                    Type::Comment => Comment::try_from(value)
-                        .inspect_err(|n| tracing::warn!("unknown comment entry subtype: {n}"))
-                        .map(Subtype::Comment)
-                        .ok()?,
-                    Type::Image => Subtype::Image { nominal: value },
-                }
-            };
-
-            let position = fields.next().unwrap();
-
-            Some(Entry {
-                r#type,
-                subtype,
-                position,
-            })
-        })
-        .collect::<Vec<Entry>>();
-
-    Ok(Header {
-        size: header_size,
-        version,
-        ntoc,
-        toc,
-    })
 }
