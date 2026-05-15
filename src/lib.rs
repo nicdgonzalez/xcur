@@ -74,9 +74,7 @@ impl Xcursor {
     }
 }
 
-// We intentionally do not use `mem::size_of::<Entry>()` here because our `Entry` struct contains
-// nested enums, which increases the struct's size beyond the original layout.
-const ENTRY_SIZE: usize = 12;
+const ENTRY_SIZE: usize = mem::size_of::<Entry>();
 
 impl TryFrom<&[u8]> for Xcursor {
     type Error = ParseError;
@@ -90,10 +88,11 @@ impl TryFrom<&[u8]> for Xcursor {
             return Err(ParseError::InvalidSignature);
         }
 
-        let header_size = parser.read_card32()?;
-        println!("Header size: {header_size}");
+        println!("Signature: {}", String::from_utf8_lossy(signature));
+
+        let _header_size = parser.read_card32()?;
         let version = parser.read_card32()?;
-        println!("File version: {version}");
+        println!("Version: {version}");
 
         let ntoc = parser.read_card32()?;
         println!("Entries in Table of Contents: {ntoc}");
@@ -104,54 +103,57 @@ impl TryFrom<&[u8]> for Xcursor {
         let toc = parser
             .read_bytes(toc_size)?
             .as_chunks::<ENTRY_SIZE>()
-            .0
+            .0 // Skip remainder because we know there is none.
             .iter()
-            .filter_map(parse_entry)
-            .collect::<Vec<Entry>>();
+            .map(parse_entry);
 
-        println!("Table of contents: {toc:#?}");
+        println!("Skipped entries: {}", ntoc_usize - toc.len());
+        println!("Table of Contents: {:#?}", toc.collect::<Vec<_>>());
 
         todo!()
     }
 }
 
-fn parse_entry(chunk: &[u8; ENTRY_SIZE]) -> Option<Entry> {
-    let mut fields = chunk
-        .as_chunks::<4>()
-        .0
+fn parse_entry(entry: &[u8; ENTRY_SIZE]) -> Option<Entry> {
+    const FIELD_SIZE: usize = mem::size_of::<u32>();
+    debug_assert_eq!(FIELD_SIZE * 3, ENTRY_SIZE);
+
+    let mut fields = entry
+        .as_chunks::<FIELD_SIZE>()
+        .0 // Skip remainder because we know there is none.
         .iter()
-        .map(|&bytes| u32::from_le_bytes(bytes));
+        .copied()
+        .map(u32::from_le_bytes);
 
-    let r#type = Type::try_from(fields.next().unwrap())
-        .inspect_err(|n| tracing::warn!("unknown entry type: {n}"))
-        .ok()?;
-
-    let subtype = {
-        let value = fields.next().unwrap();
-        match r#type {
-            Type::Comment => Comment::try_from(value)
-                .inspect_err(|n| tracing::warn!("unknown comment entry subtype: {n}"))
-                .map(Subtype::Comment)
-                .ok()?,
-            Type::Image => Subtype::Image(value),
-        }
-    };
-
+    let raw_type = fields.next().unwrap();
+    let raw_subtype = fields.next().unwrap();
     let position = fields.next().unwrap();
 
-    Some(Entry {
-        r#type,
-        subtype,
-        position,
-    })
+    let kind = match Type::try_from(raw_type)
+        .inspect_err(|n| tracing::warn!("unknown entry type: {n}"))
+        .ok()?
+    {
+        Type::Image => EntryKind::Image(raw_subtype),
+        Type::Comment => Comment::try_from(raw_subtype)
+            .inspect_err(|n| tracing::warn!("unknown comment entry subtype: {n}"))
+            .map(EntryKind::Comment)
+            .ok()?,
+    };
+
+    Some(Entry { kind, position })
 }
 
-/// Represents an entry in the Table of Contents.
+// Represents an entry in the Table of Contents.
 #[derive(Debug, Clone, Copy)]
 pub struct Entry {
-    r#type: Type,
-    subtype: Subtype,
+    kind: EntryKind,
     position: u32,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum EntryKind {
+    Image(u32),
+    Comment(Comment),
 }
 
 /// Represents the available chunk types.
@@ -172,13 +174,6 @@ impl TryFrom<u32> for Type {
             n => Err(n),
         }
     }
-}
-
-/// Represents the available chunk subtypes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Subtype {
-    Image(u32),
-    Comment(Comment),
 }
 
 /// Represents the different subtypes of a comment chunk.
