@@ -1,7 +1,8 @@
 use std::io::{self, Write};
 use std::time::Duration;
 
-use crate::{Type, write_u32_le};
+use crate::error::ParseError;
+use crate::{CARD32_SIZE, Entry, Type, write_u32_le};
 
 pub const IMAGE_HEADER_SIZE: u32 = 36;
 const IMAGE_VERSION: u32 = 1;
@@ -24,15 +25,74 @@ impl Image {
         hotspot_y: u16,
         delay: Duration,
         argb: Vec<u8>,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, ParseError> {
+        if width > 0x7FFF || height > 0x7FFF {
+            return Err(ParseError::ImageSize);
+        }
+
+        if hotspot_x > width || hotspot_y > height {
+            return Err(ParseError::InvalidHotspot);
+        }
+
+        Ok(Self {
             width,
             height,
             hotspot_x,
             hotspot_y,
             delay,
             argb,
+        })
+    }
+
+    pub(crate) fn from_chunk(buffer: &[u8], entry: &Entry) -> Result<Self, ParseError> {
+        let position = usize::try_from(entry.position).expect("u32 overflowed usize");
+        let header_size = usize::try_from(IMAGE_HEADER_SIZE).expect("u32 overflowed usize");
+
+        let start = position;
+        let end = position + header_size;
+        let raw_header = &buffer[start..end];
+
+        let mut fields = raw_header
+            .as_chunks::<CARD32_SIZE>()
+            .0
+            .iter()
+            .copied()
+            .map(u32::from_le_bytes);
+
+        let _header_size = fields.next().unwrap();
+        let _raw_type = fields.next().unwrap();
+        let _raw_subtype = fields.next().unwrap();
+        let _version = fields.next().unwrap();
+        let width = fields.next().unwrap();
+        let height = fields.next().unwrap();
+        let hotspot_x = fields.next().unwrap();
+        let hotspot_y = fields.next().unwrap();
+        let delay = fields.next().unwrap();
+
+        if width > 0x7FFF || height > 0x7FFF {
+            return Err(ParseError::ImageSize);
         }
+
+        if hotspot_x > width || hotspot_y > height {
+            return Err(ParseError::InvalidHotspot);
+        }
+
+        let image_size = {
+            let value = width * height * 4; // 4 = 1 byte per value in ARGB
+            usize::try_from(value).expect("u32 overflowed usize")
+        };
+        let start = end;
+        let end = start + image_size;
+        let argb = buffer[start..end].to_vec();
+
+        Ok(Self {
+            width: u16::try_from(width).unwrap(),
+            height: u16::try_from(height).unwrap(),
+            hotspot_x: u16::try_from(hotspot_x).unwrap(),
+            hotspot_y: u16::try_from(hotspot_y).unwrap(),
+            delay: Duration::from_millis(u64::from(delay)),
+            argb,
+        })
     }
 
     pub fn write<W>(&self, mut writer: W) -> io::Result<()>

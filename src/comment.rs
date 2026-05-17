@@ -56,6 +56,37 @@ impl Comment {
         Ok(Self { kind, buffer })
     }
 
+    pub(crate) fn from_chunk(buffer: &[u8], position: u32, kind: CommentKind) -> Self {
+        let position = usize::try_from(position).expect("u32 overflowed usize");
+        let header_size = usize::try_from(COMMENT_HEADER_SIZE).expect("u32 overflowed usize");
+
+        let start = position;
+        let end = position + header_size;
+        let raw_header = &buffer[start..end];
+
+        let mut fields = raw_header
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .copied()
+            .map(u32::from_le_bytes);
+
+        let _header_size = fields.next().unwrap();
+        let _raw_type = fields.next().unwrap();
+        let _raw_subtype = fields.next().unwrap();
+        let _version = fields.next().unwrap();
+
+        let comment_length = fields.next().unwrap();
+        let comment_length = usize::try_from(comment_length).expect("u32 overflowed usize");
+
+        let start = end;
+        let end = start + comment_length;
+        let bytes = &buffer[start..end];
+        let buffer = String::from_utf8_lossy(bytes).to_string();
+
+        Comment { kind, buffer }
+    }
+
     pub fn write<W>(&self, mut writer: W) -> io::Result<()>
     where
         W: Write,
