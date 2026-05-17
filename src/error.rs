@@ -15,13 +15,20 @@ pub enum ParseError {
         /// Number of additional bytes expected
         needed: usize,
     },
+    ImageSize,
+    InvalidHotspot,
+    CommentLength,
 }
 
 impl error::Error for ParseError {
     fn source(&self) -> Option<&(dyn error::Error + 'static)> {
         match *self {
             Self::Io { ref source } => Some(source),
-            Self::InvalidSignature | Self::NotEnoughBytes { needed: _ } => None,
+            Self::InvalidSignature
+            | Self::NotEnoughBytes { needed: _ }
+            | Self::ImageSize
+            | Self::InvalidHotspot
+            | Self::CommentLength => None,
         }
     }
 }
@@ -34,6 +41,9 @@ impl fmt::Display for ParseError {
             Self::NotEnoughBytes { needed } => {
                 write!(f, "not enough bytes (needed {needed} more bytes)")
             }
+            Self::ImageSize => "image larger than 32_767x32_767".fmt(f),
+            Self::InvalidHotspot => "hotspot must be less than or equal to image width".fmt(f),
+            Self::CommentLength => "comment exceeds 4_294_967_295 characters".fmt(f),
         }
     }
 }

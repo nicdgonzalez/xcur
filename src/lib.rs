@@ -11,7 +11,9 @@
     clippy::pedantic
 )]
 
+mod comment;
 mod error;
+mod image;
 mod parser;
 
 use std::fs::File;
@@ -20,52 +22,30 @@ use std::path::Path;
 use std::time::Duration;
 use std::{fmt, mem};
 
+use crate::comment::{COMMENT_HEADER_SIZE, Comment, CommentKind};
 use crate::error::ParseError;
+use crate::image::{IMAGE_HEADER_SIZE, Image};
 use crate::parser::Parser;
 
-pub struct Xcursor {
-    images: Vec<Image>,
-    comments: Vec<Comment>,
+const CARD32_SIZE: usize = mem::size_of::<u32>();
+
+const FILE_SIGNATURE: &[u8; 4] = b"Xcur";
+const FILE_HEADER_SIZE: u32 = 16;
+const FILE_VERSION: u32 = 0x0001_0000;
+
+const ENTRY_SIZE: usize = mem::size_of::<Entry>();
+
+fn write_u32_le<W>(writer: &mut W, value: u32) -> io::Result<()>
+where
+    W: Write,
+{
+    writer.write_all(value.to_le_bytes().as_ref())
 }
 
 #[derive(Debug, Clone)]
-pub struct Image {
-    width: u16,
-    height: u16,
-    hotspot_x: u16,
-    hotspot_y: u16,
-    delay: Duration,
-    argb: Vec<u8>,
-}
-
-impl Image {
-    pub fn write<W>(&self, mut writer: W) -> io::Result<()>
-    where
-        W: Write,
-    {
-        let width = u32::from(self.width);
-        let height = u32::from(self.height);
-        let hotspot_x = u32::from(self.hotspot_x);
-        let hotspot_y = u32::from(self.hotspot_y);
-
-        // Nominal size subtype -- usually the height/width for square cursors.
-        let subtype = width;
-
-        let delay = self.delay.as_millis().try_into().unwrap_or(u32::MAX);
-
-        writer.write_all(u32::to_le_bytes(36).as_ref())?;
-        writer.write_all((Type::Image as u32).to_le_bytes().as_ref())?;
-        writer.write_all(u32::to_le_bytes(subtype).as_ref())?;
-        writer.write_all(u32::to_le_bytes(1).as_ref())?;
-        writer.write_all(u32::to_le_bytes(width).as_ref())?;
-        writer.write_all(u32::to_le_bytes(height).as_ref())?;
-        writer.write_all(u32::to_le_bytes(hotspot_x).as_ref())?;
-        writer.write_all(u32::to_le_bytes(hotspot_y).as_ref())?;
-        writer.write_all(u32::to_le_bytes(delay).as_ref())?;
-        writer.write_all(&self.argb)?;
-
-        Ok(())
-    }
+pub struct Xcursor {
+    images: Vec<Image>,
+    comments: Vec<Comment>,
 }
 
 impl Xcursor {
@@ -121,54 +101,57 @@ impl Xcursor {
     where
         W: Write,
     {
-        let entry_count = self.comments.len() + self.images.len();
+        let entry_count = self.images.len() + self.comments.len();
         let entry_count = u32::try_from(entry_count).expect("usize overflowed u32");
 
-        writer.write_all(b"Xcur")?;
-        writer.write_all(u32::to_le_bytes(16).as_ref())?;
-        writer.write_all(u32::to_le_bytes(0x0001_0000).as_ref())?;
-        writer.write_all(u32::to_le_bytes(entry_count).as_ref())?;
+        writer.write_all(FILE_SIGNATURE.as_slice())?;
+        write_u32_le(&mut writer, FILE_HEADER_SIZE)?;
+        write_u32_le(&mut writer, FILE_VERSION)?;
+        write_u32_le(&mut writer, entry_count)?;
 
         let mut offset = 16 + (12 * entry_count); // Start from the end of the Table of Contents.
 
         // Construct the Table of Contents.
-        for entry in &self.comments {
-            let comment_length = entry.buffer.len();
-            let comment_length =
-                u32::try_from(comment_length).expect("comment length should not exceed u32");
-
-            writer.write_all((Type::Comment as u32).to_le_bytes().as_ref())?;
-            writer.write_all((entry.kind as u32).to_le_bytes().as_ref())?;
-            writer.write_all(offset.to_le_bytes().as_ref())?;
-
-            offset += 20 + comment_length;
-        }
-
         for entry in &self.images {
-            let image_length = entry.argb.len();
-            let image_length =
-                u32::try_from(image_length).expect("image length should not exceed u32");
+            write_u32_le(&mut writer, Type::Image as u32)?;
+            write_u32_le(&mut writer, u32::from(entry.width()))?;
+            write_u32_le(&mut writer, offset)?;
 
-            writer.write_all((Type::Image as u32).to_le_bytes().as_ref())?;
-            writer.write_all(entry.width.to_le_bytes().as_ref())?;
-            writer.write_all(offset.to_le_bytes().as_ref())?;
-
-            offset += 36 + image_length;
+            let image_size = u32::try_from(entry.argb().len()).expect("u32 overflowed usize");
+            offset += IMAGE_HEADER_SIZE + image_size;
         }
 
         for entry in &self.comments {
+            write_u32_le(&mut writer, Type::Comment as u32)?;
+            write_u32_le(&mut writer, entry.kind() as u32)?;
+            write_u32_le(&mut writer, offset)?;
+
+            let comment_size = u32::try_from(entry.buffer().len()).expect("u32 overflowed usize");
+            offset += COMMENT_HEADER_SIZE + comment_size;
+        }
+
+        // Write chunks in same order as Table of Contents (i.e., images first, then comments).
+        for entry in &self.images {
             entry.write(&mut writer)?;
         }
 
-        for entry in &self.images {
+        for entry in &self.comments {
             entry.write(&mut writer)?;
         }
 
         Ok(())
     }
-}
 
-const ENTRY_SIZE: usize = mem::size_of::<Entry>();
+    #[must_use]
+    pub fn images(&self) -> &[Image] {
+        &self.images
+    }
+
+    #[must_use]
+    pub fn comments(&self) -> &[Comment] {
+        &self.comments
+    }
+}
 
 impl TryFrom<&[u8]> for Xcursor {
     type Error = ParseError;
@@ -182,17 +165,12 @@ impl TryFrom<&[u8]> for Xcursor {
             return Err(ParseError::InvalidSignature);
         }
 
-        println!("Signature: {}", String::from_utf8_lossy(signature));
-
         let _header_size = parser.read_card32()?;
-        let version = parser.read_card32()?;
-        println!("Version: {version}");
+        let _version = parser.read_card32()?;
 
         let entry_count = parser.read_card32()?;
-        println!("Entries in Table of Contents: {entry_count}");
-
-        let table_of_contents_size =
-            ENTRY_SIZE * usize::try_from(entry_count).expect("u32 overflowed usize");
+        let entry_count_usize = usize::try_from(entry_count).expect("u32 overflowed usize");
+        let table_of_contents_size = ENTRY_SIZE * entry_count_usize;
 
         let table_of_contents = parser
             .read_bytes(table_of_contents_size)?
@@ -202,81 +180,28 @@ impl TryFrom<&[u8]> for Xcursor {
             .filter_map(parse_entry)
             .collect::<Vec<_>>();
 
-        println!("Table of Contents: {table_of_contents:#?}");
+        let images = table_of_contents
+            .iter()
+            .filter(|entry| matches!(entry.kind, EntryKind::Image(_)))
+            .map(|entry| parse_image(value, entry))
+            .collect::<Result<Vec<_>, ParseError>>()?;
 
-        for entry in table_of_contents {
-            match entry.kind {
-                EntryKind::Image(nominal) => {
-                    println!("Nominal size: {nominal}");
-                    let position = usize::try_from(entry.position).expect("u32 overflowed usize");
-                    let raw_header = value
-                        .iter()
-                        .skip(position)
-                        .take(36)
-                        .copied()
-                        .collect::<Vec<_>>();
-                    let mut fields = raw_header
-                        .as_chunks::<4>()
-                        .0
-                        .iter()
-                        .copied()
-                        .map(u32::from_le_bytes);
+        let comments = table_of_contents
+            .iter()
+            .filter_map(|entry| match entry.kind {
+                EntryKind::Image(_) => None,
+                EntryKind::Comment(kind) => Some((entry.position, kind)),
+            })
+            .map(|(position, kind)| parse_comment(value, position, kind))
+            .collect::<Vec<_>>();
 
-                    let header_size = {
-                        let value = fields.next().unwrap();
-                        usize::try_from(value).expect("u32 overflowed usize")
-                    };
-
-                    let _raw_type = fields.next().unwrap();
-                    let _raw_subtype = fields.next().unwrap();
-
-                    let version = fields.next().unwrap();
-                    println!("Version: {version}");
-
-                    let width = fields.next().unwrap();
-                    println!("Width: {width}");
-                    assert!(width < 0x7FFF);
-
-                    let height = fields.next().unwrap();
-                    println!("Height: {height}");
-                    assert!(height < 0x7FFF);
-
-                    let hotspot_x = fields.next().unwrap();
-                    println!("Hotspot X: {hotspot_x}");
-                    let hotspot_y = fields.next().unwrap();
-                    println!("Hotspot Y: {hotspot_y}");
-
-                    let delay = fields.next().unwrap();
-                    println!("Delay: {delay}");
-
-                    let image_size =
-                        usize::try_from(width * height * 4).expect("u32 overflowed usize");
-                    let argb = value
-                        .iter()
-                        .skip(position + header_size)
-                        .take(image_size)
-                        .copied()
-                        .collect::<Vec<_>>();
-
-                    println!("{:->80}", "");
-                }
-                EntryKind::Comment(comment) => {
-                    println!("Comment subtype: {comment}");
-                    // parse comment chunk
-                }
-            }
-        }
-
-        todo!()
+        Ok(Xcursor { images, comments })
     }
 }
 
 fn parse_entry(entry: &[u8; ENTRY_SIZE]) -> Option<Entry> {
-    const FIELD_SIZE: usize = mem::size_of::<u32>();
-    debug_assert_eq!(FIELD_SIZE * 3, ENTRY_SIZE);
-
     let mut fields = entry
-        .as_chunks::<FIELD_SIZE>()
+        .as_chunks::<CARD32_SIZE>()
         .0 // Skip remainder because we know there is none.
         .iter()
         .copied()
@@ -298,6 +223,88 @@ fn parse_entry(entry: &[u8; ENTRY_SIZE]) -> Option<Entry> {
     };
 
     Some(Entry { kind, position })
+}
+
+fn parse_image(buffer: &[u8], entry: &Entry) -> Result<Image, ParseError> {
+    let position = usize::try_from(entry.position).expect("u32 overflowed usize");
+    let header_size = usize::try_from(IMAGE_HEADER_SIZE).expect("u32 overflowed usize");
+
+    let start = position;
+    let end = position + header_size;
+    let raw_header = &buffer[start..end];
+
+    let mut fields = raw_header
+        .as_chunks::<CARD32_SIZE>()
+        .0
+        .iter()
+        .copied()
+        .map(u32::from_le_bytes);
+
+    let _header_size = fields.next().unwrap();
+    let _raw_type = fields.next().unwrap();
+    let _raw_subtype = fields.next().unwrap();
+    let _version = fields.next().unwrap();
+    let width = fields.next().unwrap();
+    let height = fields.next().unwrap();
+    let hotspot_x = fields.next().unwrap();
+    let hotspot_y = fields.next().unwrap();
+    let delay = fields.next().unwrap();
+
+    if width > 0x7FFF || height > 0x7FFF {
+        return Err(ParseError::ImageSize);
+    }
+
+    if hotspot_x > width || hotspot_y > height {
+        return Err(ParseError::InvalidHotspot);
+    }
+
+    let image_size = {
+        let value = width * height * 4; // 4 = 1 byte per value in ARGB
+        usize::try_from(value).expect("u32 overflowed usize")
+    };
+    let start = end;
+    let end = start + image_size;
+    let argb = buffer[start..end].to_vec();
+
+    Ok(Image::new(
+        u16::try_from(width).expect("width is not less than or equal to 0x7FFF"),
+        u16::try_from(height).expect("height is not less than or equal to 0x7FFF"),
+        u16::try_from(hotspot_x).expect("hotspot x is not less than or equal to width"),
+        u16::try_from(hotspot_y).expect("hotspot y is not less than or equal to height"),
+        Duration::from_millis(u64::from(delay)),
+        argb,
+    ))
+}
+
+fn parse_comment(buffer: &[u8], position: u32, kind: CommentKind) -> Comment {
+    let position = usize::try_from(position).expect("u32 overflowed usize");
+    let header_size = usize::try_from(COMMENT_HEADER_SIZE).expect("u32 overflowed usize");
+
+    let start = position;
+    let end = position + header_size;
+    let raw_header = &buffer[start..end];
+
+    let mut fields = raw_header
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .copied()
+        .map(u32::from_le_bytes);
+
+    let _header_size = fields.next().unwrap();
+    let _raw_type = fields.next().unwrap();
+    let _raw_subtype = fields.next().unwrap();
+    let _version = fields.next().unwrap();
+
+    let comment_length = fields.next().unwrap();
+    let comment_length = usize::try_from(comment_length).expect("u32 overflowed usize");
+
+    let start = end;
+    let end = start + comment_length;
+    let bytes = &buffer[start..end];
+    let buffer = String::from_utf8_lossy(bytes).to_string();
+
+    Comment::new(kind, buffer).unwrap()
 }
 
 // Represents an entry in the Table of Contents.
@@ -333,59 +340,21 @@ impl TryFrom<u32> for Type {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct Comment {
-    kind: CommentKind,
-    buffer: String,
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-impl Comment {
-    pub fn write<W>(&self, mut writer: W) -> io::Result<()>
-    where
-        W: Write,
-    {
-        // TODO: Ensure buffer length is at most u32, per Xcursor specification.
-        let buffer_length = u32::try_from(self.buffer.len()).expect("usize overflowed u32");
+    #[test]
+    fn no_images() {
+        let buffer = &[
+            b'X', b'c', b'u', b'r', // File signature
+            16, 0, 0, 0, // Header size
+            0, 0, 1, 0, // Version
+            0, 0, 0, 0, // Entry count for the Table of Contents
+        ];
 
-        writer.write_all(u32::to_le_bytes(20).as_ref())?;
-        writer.write_all((Type::Comment as u32).to_le_bytes().as_ref())?;
-        writer.write_all((self.kind as u32).to_le_bytes().as_ref())?;
-        writer.write_all(u32::to_le_bytes(1).as_ref())?;
-        writer.write_all(buffer_length.to_le_bytes().as_ref())?;
-        writer.write_all(self.buffer.as_bytes())?;
-
-        Ok(())
-    }
-}
-
-/// Represents the different subtypes of a comment chunk.
-#[repr(u32)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CommentKind {
-    Copyright = 1,
-    License = 2,
-    Other = 3,
-}
-
-impl TryFrom<u32> for CommentKind {
-    type Error = u32;
-
-    fn try_from(value: u32) -> Result<Self, Self::Error> {
-        match value {
-            1 => Ok(Self::Copyright),
-            2 => Ok(Self::License),
-            3 => Ok(Self::Other),
-            n => Err(n),
-        }
-    }
-}
-
-impl fmt::Display for CommentKind {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match *self {
-            Self::Copyright => "Copyright".fmt(f),
-            Self::License => "License".fmt(f),
-            Self::Other => "Other".fmt(f),
-        }
+        let cursor = Xcursor::from_bytes(buffer).expect("failed to construct cursor");
+        assert_eq!(cursor.images.len(), 0);
+        assert_eq!(cursor.comments.len(), 0);
     }
 }
