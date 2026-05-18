@@ -21,9 +21,11 @@ use std::io::{self, Read, Write};
 use std::mem;
 use std::path::Path;
 
-use crate::comment::{COMMENT_HEADER_SIZE, Comment, CommentKind};
+use crate::comment::COMMENT_HEADER_SIZE;
+pub use crate::comment::{Comment, CommentKind};
 use crate::error::ParseError;
-use crate::image::{IMAGE_HEADER_SIZE, Image};
+use crate::image::IMAGE_HEADER_SIZE;
+pub use crate::image::Image;
 use crate::parser::Parser;
 
 pub(crate) const CARD32_SIZE: usize = mem::size_of::<u32>();
@@ -34,7 +36,7 @@ const FILE_VERSION: u32 = 0x0001_0000;
 
 const ENTRY_SIZE: usize = mem::size_of::<Entry>();
 
-fn write_u32_le<W>(writer: &mut W, value: u32) -> io::Result<()>
+fn write_card32<W>(writer: &mut W, value: u32) -> io::Result<()>
 where
     W: Write,
 {
@@ -48,6 +50,11 @@ pub struct Xcursor {
 }
 
 impl Xcursor {
+    #[must_use]
+    pub fn new(images: Vec<Image>, comments: Vec<Comment>) -> Self {
+        Self { images, comments }
+    }
+
     /// Read the file at path and decode it.
     ///
     /// # Errors
@@ -104,26 +111,26 @@ impl Xcursor {
         let entry_count = u32::try_from(entry_count).expect("usize overflowed u32");
 
         writer.write_all(FILE_SIGNATURE.as_slice())?;
-        write_u32_le(&mut writer, FILE_HEADER_SIZE)?;
-        write_u32_le(&mut writer, FILE_VERSION)?;
-        write_u32_le(&mut writer, entry_count)?;
+        write_card32(&mut writer, FILE_HEADER_SIZE)?;
+        write_card32(&mut writer, FILE_VERSION)?;
+        write_card32(&mut writer, entry_count)?;
 
         let mut offset = 16 + (12 * entry_count); // Start from the end of the Table of Contents.
 
         // Construct the Table of Contents.
         for entry in &self.images {
-            write_u32_le(&mut writer, Type::Image as u32)?;
-            write_u32_le(&mut writer, u32::from(entry.width()))?;
-            write_u32_le(&mut writer, offset)?;
+            write_card32(&mut writer, Type::Image as u32)?;
+            write_card32(&mut writer, u32::from(entry.width()))?;
+            write_card32(&mut writer, offset)?;
 
             let image_size = u32::try_from(entry.argb().len()).expect("u32 overflowed usize");
             offset += IMAGE_HEADER_SIZE + image_size;
         }
 
         for entry in &self.comments {
-            write_u32_le(&mut writer, Type::Comment as u32)?;
-            write_u32_le(&mut writer, entry.kind() as u32)?;
-            write_u32_le(&mut writer, offset)?;
+            write_card32(&mut writer, Type::Comment as u32)?;
+            write_card32(&mut writer, entry.kind() as u32)?;
+            write_card32(&mut writer, offset)?;
 
             let comment_size = u32::try_from(entry.buffer().len()).expect("u32 overflowed usize");
             offset += COMMENT_HEADER_SIZE + comment_size;

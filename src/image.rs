@@ -2,7 +2,7 @@ use std::io::{self, Write};
 use std::time::Duration;
 
 use crate::error::ParseError;
-use crate::{CARD32_SIZE, Entry, Type, write_u32_le};
+use crate::{CARD32_SIZE, Entry, Type, write_card32};
 
 pub const IMAGE_HEADER_SIZE: u32 = 36;
 const IMAGE_VERSION: u32 = 1;
@@ -109,15 +109,15 @@ impl Image {
 
         let delay = self.delay.as_millis().try_into().unwrap_or(u32::MAX);
 
-        write_u32_le(&mut writer, IMAGE_HEADER_SIZE)?;
-        write_u32_le(&mut writer, Type::Image as u32)?;
-        write_u32_le(&mut writer, subtype)?;
-        write_u32_le(&mut writer, IMAGE_VERSION)?;
-        write_u32_le(&mut writer, width)?;
-        write_u32_le(&mut writer, height)?;
-        write_u32_le(&mut writer, hotspot_x)?;
-        write_u32_le(&mut writer, hotspot_y)?;
-        write_u32_le(&mut writer, delay)?;
+        write_card32(&mut writer, IMAGE_HEADER_SIZE)?;
+        write_card32(&mut writer, Type::Image as u32)?;
+        write_card32(&mut writer, subtype)?;
+        write_card32(&mut writer, IMAGE_VERSION)?;
+        write_card32(&mut writer, width)?;
+        write_card32(&mut writer, height)?;
+        write_card32(&mut writer, hotspot_x)?;
+        write_card32(&mut writer, hotspot_y)?;
+        write_card32(&mut writer, delay)?;
         writer.write_all(&self.argb)?;
 
         Ok(())

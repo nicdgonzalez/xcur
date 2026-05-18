@@ -2,7 +2,7 @@ use std::io::Write;
 use std::{fmt, io};
 
 use crate::error::ParseError;
-use crate::{Type, write_u32_le};
+use crate::{Type, write_card32};
 
 pub const COMMENT_HEADER_SIZE: u32 = 20;
 const COMMENT_VERSION: u32 = 1;
@@ -93,11 +93,11 @@ impl Comment {
     {
         let buffer_length = u32::try_from(self.buffer.len()).unwrap();
 
-        write_u32_le(&mut writer, COMMENT_HEADER_SIZE)?;
-        write_u32_le(&mut writer, Type::Comment as u32)?;
-        write_u32_le(&mut writer, self.kind as u32)?;
-        write_u32_le(&mut writer, COMMENT_VERSION)?;
-        write_u32_le(&mut writer, buffer_length)?;
+        write_card32(&mut writer, COMMENT_HEADER_SIZE)?;
+        write_card32(&mut writer, Type::Comment as u32)?;
+        write_card32(&mut writer, self.kind as u32)?;
+        write_card32(&mut writer, COMMENT_VERSION)?;
+        write_card32(&mut writer, buffer_length)?;
         writer.write_all(self.buffer.as_bytes())?;
 
         Ok(())
