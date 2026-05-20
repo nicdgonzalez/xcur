@@ -14,7 +14,7 @@ pub struct Image {
     hotspot_x: u16,
     hotspot_y: u16,
     delay: Duration,
-    argb: Vec<u8>,
+    argb: Vec<u32>,
 }
 
 impl Image {
@@ -24,14 +24,24 @@ impl Image {
         hotspot_x: u16,
         hotspot_y: u16,
         delay: Duration,
-        argb: Vec<u8>,
+        argb: Vec<u32>,
     ) -> Result<Self, ParseError> {
         if width > 0x7FFF || height > 0x7FFF {
             return Err(ParseError::ImageSize);
         }
 
-        if hotspot_x > width || hotspot_y > height {
-            return Err(ParseError::InvalidHotspot);
+        if hotspot_x > width {
+            return Err(ParseError::InvalidHotspot {
+                image_size: width,
+                hotspot: hotspot_x,
+            });
+        }
+
+        if hotspot_y > height {
+            return Err(ParseError::InvalidHotspot {
+                image_size: height,
+                hotspot: hotspot_y,
+            });
         }
 
         Ok(Self {
@@ -73,8 +83,18 @@ impl Image {
             return Err(ParseError::ImageSize);
         }
 
-        if hotspot_x > width || hotspot_y > height {
-            return Err(ParseError::InvalidHotspot);
+        if hotspot_x > width {
+            return Err(ParseError::InvalidHotspot {
+                image_size: u16::try_from(width).unwrap(),
+                hotspot: u16::try_from(hotspot_x).expect("u32 hotspot x overflowed u16"),
+            });
+        }
+
+        if hotspot_y > height {
+            return Err(ParseError::InvalidHotspot {
+                image_size: u16::try_from(height).unwrap(),
+                hotspot: u16::try_from(hotspot_y).expect("u32 hotspot y overflowed u16"),
+            });
         }
 
         let image_size = {
@@ -83,7 +103,13 @@ impl Image {
         };
         let start = end;
         let end = start + image_size;
-        let argb = buffer[start..end].to_vec();
+        let argb = buffer[start..end]
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .copied()
+            .map(u32::from_le_bytes)
+            .collect::<Vec<u32>>();
 
         Ok(Self {
             width: u16::try_from(width).unwrap(),
@@ -99,13 +125,18 @@ impl Image {
     where
         W: Write,
     {
+        assert_eq!(
+            self.argb.len(),
+            usize::from(self.width) * usize::from(self.height)
+        );
+
         let width = u32::from(self.width);
         let height = u32::from(self.height);
         let hotspot_x = u32::from(self.hotspot_x);
         let hotspot_y = u32::from(self.hotspot_y);
 
         // Nominal size subtype -- usually width/height for square cursors.
-        let subtype = width;
+        let subtype = width.max(height);
 
         let delay = self.delay.as_millis().try_into().unwrap_or(u32::MAX);
 
@@ -118,7 +149,10 @@ impl Image {
         write_card32(&mut writer, hotspot_x)?;
         write_card32(&mut writer, hotspot_y)?;
         write_card32(&mut writer, delay)?;
-        writer.write_all(&self.argb)?;
+
+        for &pixel in &self.argb {
+            write_card32(&mut writer, pixel)?;
+        }
 
         Ok(())
     }
@@ -149,7 +183,7 @@ impl Image {
     }
 
     #[must_use]
-    pub fn argb(&self) -> &[u8] {
+    pub fn argb(&self) -> &[u32] {
         &self.argb
     }
 }

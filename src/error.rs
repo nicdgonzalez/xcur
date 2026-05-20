@@ -16,7 +16,10 @@ pub enum ParseError {
         needed: usize,
     },
     ImageSize,
-    InvalidHotspot,
+    InvalidHotspot {
+        image_size: u16,
+        hotspot: u16,
+    },
     CommentLength,
 }
 
@@ -27,7 +30,10 @@ impl error::Error for ParseError {
             Self::InvalidSignature
             | Self::NotEnoughBytes { needed: _ }
             | Self::ImageSize
-            | Self::InvalidHotspot
+            | Self::InvalidHotspot {
+                image_size: _,
+                hotspot: _,
+            }
             | Self::CommentLength => None,
         }
     }
@@ -42,7 +48,13 @@ impl fmt::Display for ParseError {
                 write!(f, "not enough bytes (needed {needed} more bytes)")
             }
             Self::ImageSize => "image larger than 32_767x32_767".fmt(f),
-            Self::InvalidHotspot => "hotspot must be less than or equal to image width".fmt(f),
+            Self::InvalidHotspot {
+                image_size: source,
+                hotspot: target,
+            } => write!(
+                f,
+                "hotspot must be less than or equal to image width ({target} > {source})"
+            ),
             Self::CommentLength => "comment exceeds 4_294_967_295 characters".fmt(f),
         }
     }

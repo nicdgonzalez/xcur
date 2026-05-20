@@ -115,7 +115,8 @@ impl Xcursor {
         write_card32(&mut writer, FILE_VERSION)?;
         write_card32(&mut writer, entry_count)?;
 
-        let mut offset = 16 + (12 * entry_count); // Start from the end of the Table of Contents.
+        let entry_size = u32::try_from(ENTRY_SIZE).expect("u32 overflowed usize");
+        let mut offset = 16 + (entry_size * entry_count); // Start from the end of the Table of Contents.
 
         // Construct the Table of Contents.
         for entry in &self.images {
@@ -123,7 +124,9 @@ impl Xcursor {
             write_card32(&mut writer, u32::from(entry.width()))?;
             write_card32(&mut writer, offset)?;
 
-            let image_size = u32::try_from(entry.argb().len()).expect("u32 overflowed usize");
+            let image_size = entry.argb().len() * CARD32_SIZE;
+            let image_size = u32::try_from(image_size).expect("u32 overflowed usize");
+
             offset += IMAGE_HEADER_SIZE + image_size;
         }
 
