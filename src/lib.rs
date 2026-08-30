@@ -16,7 +16,7 @@ mod error;
 mod image;
 mod parser;
 
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::mem;
 use std::path::Path;
@@ -149,6 +149,16 @@ impl Xcursor {
         }
 
         Ok(())
+    }
+
+    pub fn save<P>(&self, path: P) -> io::Result<()>
+    where
+        P: AsRef<Path>,
+    {
+        let mut buffer = Vec::new();
+        self.write(&mut buffer)?;
+
+        fs::write(path.as_ref(), &buffer)
     }
 
     #[must_use]
